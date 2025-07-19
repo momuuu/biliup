@@ -1,15 +1,25 @@
 'use client'
-import React from 'react'
-import { Form, Select, Collapse } from '@douyinfe/semi-ui'
+import React, { useEffect } from 'react'
+import { Form, Select, Collapse, useFormApi } from '@douyinfe/semi-ui'
 
 type Props = {
   entity: any
   list: any
+  initValues?: Record<string, any>
 }
 
 const Bilibili: React.FC<Props> = props => {
-  const entity = props.entity
-  const list = props.list
+  const { entity, list, initValues } = props
+  const formApi = useFormApi()
+
+  useEffect(() => {
+    if (initValues) {
+      Object.entries(initValues).forEach(([key, value]) => {
+        formApi.setValue(key, value)
+      })
+    }
+  }, [initValues, formApi])
+
   return (
     <>
       <Collapse.Panel header="哔哩哔哩" itemKey="bilibili">
@@ -57,6 +67,15 @@ const Bilibili: React.FC<Props> = props => {
           field="bilibili_danmaku_detail"
           extraText="录制的弹幕信息中包含发送者昵称、用户UID，同时保存醒目留言、上舰、礼物信息。仅 bilibili_danmaku 开启时生效，默认关闭（实验性质：可能与弹幕转ass工具不兼容）"
           label="录制详细弹幕（bilibili_danmaku_detail）"
+          fieldStyle={{
+            alignSelf: 'stretch',
+            padding: 0,
+          }}
+        />
+        <Form.Switch
+          field="bilibili_danmaku_raw"
+          extraText="录制B站服务器返回的原始弹幕信息，方便有技术能力的用户对主播弹幕数据进行统计。仅 bilibili_danmaku 开启时生效，默认关闭，开启后弹幕文件会每隔5分钟写入一次（实验性质：可能导致弹幕文件巨大）"
+          label="录制完整弹幕（bilibili_danmaku_raw）"
           fieldStyle={{
             alignSelf: 'stretch',
             padding: 0,

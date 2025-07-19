@@ -1,6 +1,9 @@
 import asyncio
+import inspect
+import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -9,21 +12,25 @@ import shutil
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Callable, Optional
 from urllib.parse import urlparse
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 import requests
 from requests.utils import DEFAULT_ACCEPT_ENCODING
 from httpx import HTTPStatusError
 
 from biliup.common.util import client, loop, check_timerange
-from biliup.database.db import add_stream_info, SessionLocal, update_cover_path, update_room_title, update_file_list
+from biliup.database.db import add_stream_info, SessionLocal, get_stream_info, update_cover_path, update_room_title, update_file_list
 from biliup.plugins import random_user_agent
 import stream_gears
 from PIL import Image
 
 from biliup.config import config
 from biliup.Danmaku import IDanmakuClient
+from biliup.plugins.bili_webup_sync import BiliWebAsync
+from biliup.uploader import fmt_title_and_desc
 
+from .sync_downloader import SyncDownloader
+from biliup.app import context
 logger = logging.getLogger('biliup')
 
 
@@ -60,6 +67,7 @@ class DownloadBase(ABC):
         }
         self.segment_time = config.get('segment_time', '01:00:00')
         self.time_range = config.get('time_range')
+        self.excluded_keywords = config.get('excluded_keywords')
         self.file_size = config.get('file_size')
 
         # 是否是下载模式 跳过下播检测
@@ -74,38 +82,67 @@ class DownloadBase(ABC):
         # 弹幕客户端
         self.danmaku: Optional[IDanmakuClient] = None
 
-        self.plugin_msg = f"[{self.__class__.__name__}]{self.fname} - {url}"
+        self.platform = self.__class__.__name__
+        self.plugin_msg = f"[{self.platform}]{self.fname} - {self.url}"
 
     @abstractmethod
     async def acheck_stream(self, is_check=False):
         # is_check 是否是检测模式 检测模式可以忽略只有下载时需要的耗时操作
         raise NotImplementedError()
 
-    def pre_check(self):
-        if check_timerange(self.fname):
-            return True
+    def should_record(self):
+        # 检查房间名
+        keywords = config['streamers'].get(self.fname, {}).get('excluded_keywords')
+        if self.room_title and keywords:
+            if any(k.strip() in self.room_title for k in keywords):
+                return False
+
+        # 检查时间范围
+        if not check_timerange(self.fname):
+            return False
+
+        return True
 
     def download(self):
-        logger.info(f"{self.plugin_msg}: Start downloading {self.raw_stream_url}")
+        # print(f"{self.plugin_msg}: Plugin settings - {self.__dict__}")
+        logger.debug(f"{self.plugin_msg}: Plugin settings - {self.__dict__}")
+        # logger.info(f"{self.plugin_msg}: Request headers - {self.fake_headers}")
+        logger.info(f"{self.plugin_msg}: Request url - {self.raw_stream_url}")
+        # 调试使用边录边上传功能
+        # self.downloader = 'sync-downloader'
         if self.is_download:
             if not shutil.which("ffmpeg"):
                 logger.error("未安装 FFMpeg 或不存在于 PATH 内")
-                logger.debug("Current user's PATH is:" + os.getenv("PATH"))
+                logger.info("Current user's PATH is:" + os.getenv("PATH"))
                 return False
             else:
                 return self.ffmpeg_segment_download()
 
         parsed_url_path = urlparse(self.raw_stream_url).path
-        if self.downloader == 'streamlink' or self.downloader == 'ffmpeg':
-            if shutil.which("ffmpeg"):
+        if self.downloader != 'stream-gears':
+            if not shutil.which("ffmpeg"):
+                logger.error("未安装 FFMpeg 或不存在于 PATH 内，本次下载使用 stream-gears")
+                logger.info("Current user's PATH is:" + os.getenv("PATH"))
+            else:
+                # 同步下载上传器
+                if self.downloader == 'sync-downloader':
+                    logger.info(f"{self.plugin_msg}: 使用同步下载器")
+                    stream_info = config.get('streamers', {}).get(self.fname, {})
+                    stream_info.update({'name': self.fname})
+                    min_size = 10 * 1024 * 1024
+                    if not self.file_size:
+                        self.file_size = 2 * 1024 * 1024 * 1024
+                    self.file_size = ((self.file_size + min_size - 1) // min_size) * min_size  # 向上取整
+                    sync_download(self.raw_stream_url, self.fake_headers,
+                                max_file_size=int(self.file_size / 1024 / 1024),
+                                output_prefix=self.gen_download_filename(True),
+                                stream_info=stream_info,
+                                file_name_callback=lambda file_name: self.__download_segment_callback(file_name), database_row_id=self.database_row_id)
+                    return True
                 # streamlink无法处理flv,所以回退到ffmpeg
                 if self.downloader == 'streamlink' and '.flv' not in parsed_url_path:
                     return self.ffmpeg_download(use_streamlink=True)
-                else:
-                    return self.ffmpeg_download()
-            else:
-                logger.error("未安装 FFMpeg 或不存在于 PATH 内，本次下载使用 stream-gears")
-                logger.debug("Current user's PATH is:" + os.getenv("PATH"))
+                return self.ffmpeg_download()
 
         if '.flv' in parsed_url_path:
             # 假定flv流
@@ -176,20 +213,31 @@ class DownloadBase(ABC):
             # 文件名不含后戳
             fmt_file_name = self.gen_download_filename(is_fmt=True)
             # ffmpeg 输入参数
-            input_args = []
+            input_args = [
+                # '-http_proxy', 'http://127.0.0.1:10808',
+                # "-fflags", "+genpts",
+            ]
             # ffmpeg 输出参数
-            output_args = []
-            if use_streamlink:
+            output_args = [
+                '-c',
+                'copy',
+            ]
+            # https://github.com/biliup/biliup/issues/991
+            if use_streamlink and not self.raw_stream_url.startswith('http://localhost:'):
                 streamlink_cmd = [
                     'streamlink',
                     '--stream-segment-threads', '3',
                     '--hls-playlist-reload-attempts', '1',
-                    '--http-header',
-                    ';'.join([f'{key}={value}' for key, value in self.fake_headers.items()]),
+                    # '--http-proxy', 'http://127.0.0.1:7890',
+                    # '--hls-live-restart',
+                ]
+                for key, value in self.fake_headers.items():
+                    streamlink_cmd.extend(['--http-header', f'{key}={value}'])
+                streamlink_cmd.extend([
                     self.raw_stream_url,
                     'best',
                     '-O'
-                ]
+                ])
                 streamlink_proc = subprocess.Popen(streamlink_cmd, stdout=subprocess.PIPE)
                 input_uri = 'pipe:0'
             else:
@@ -218,13 +266,10 @@ class DownloadBase(ABC):
             else:
                 output_args += ['-f', self.suffix]
 
-            args = ['ffmpeg', '-y', *input_args, *output_args, '-c', 'copy',
+            args = ['ffmpeg', '-y', *input_args, *output_args,
                     f'{fmt_file_name}.{self.suffix}.part']
             with subprocess.Popen(args, stdin=subprocess.DEVNULL if not streamlink_proc else streamlink_proc.stdout,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
-                # with SessionLocal() as db:
-                #     update_file_list(db, self.database_row_id, fmt_file_name)
-                #     updatedFileList = True
                 for line in iter(proc.stdout.readline, b''):  # b'\n'-separated lines
                     decode_line = line.rstrip().decode(errors='ignore')
                     print(decode_line)
@@ -238,10 +283,6 @@ class DownloadBase(ABC):
                 return True
             else:
                 return False
-        # except:
-        #     if updatedFileList:
-        #         with SessionLocal() as db:
-        #             delete_file_list(db, self.database_row_id, None)
         finally:
             try:
                 if streamlink_proc:
@@ -287,7 +328,7 @@ class DownloadBase(ABC):
 
     def run(self):
         try:
-            if not asyncio.run_coroutine_threadsafe(self.acheck_stream(), loop).result() or not self.pre_check():
+            if not asyncio.run_coroutine_threadsafe(self.acheck_stream(), loop).result() or not self.should_record():
                 return False
             with SessionLocal() as db:
                 update_room_title(db, self.database_row_id, self.room_title)
@@ -317,7 +358,10 @@ class DownloadBase(ABC):
                 ret = self.run()
             except Exception:
                 logger.warning(f"{self.plugin_msg}: 下载失败", exc_info=True)
+                # TODO: 重试等待时间
+                time.sleep(3)
             finally:
+
                 self.close()
 
             # 下载模式跳过下播延迟检测
@@ -329,7 +373,7 @@ class DownloadBase(ABC):
 
         self.download_cover(
             time.strftime(self.gen_download_filename().encode("unicode-escape").decode(), end_time if end_time else time.localtime()
-                           ).encode().decode("unicode-escape"))
+                          ).encode().decode("unicode-escape"))
         # 更新数据库中封面存储路径
         with SessionLocal() as db:
             update_cover_path(db, self.database_row_id, self.live_cover_path)
@@ -342,6 +386,11 @@ class DownloadBase(ABC):
             self.download_success_callback()
         # self.segment_processor_thread
         logger.info(f'{self.plugin_msg}: 退出下载')
+
+        if str(self.database_row_id) in context["sync_downloader_map"]:
+            context["sync_downloader_map"].pop(str(self.database_row_id))
+            logger.info(f"{self.plugin_msg} {self.database_row_id}: 从同步下载器列表中移除")
+
         stream_info = {
             'name': self.fname,
             'url': self.url,
@@ -350,6 +399,7 @@ class DownloadBase(ABC):
             'end_time': end_time if end_time else time.localtime(),
             'live_cover_path': self.live_cover_path,
             'is_download': self.is_download,
+            'platform': self.platform,
         }
         return stream_info
 
@@ -416,7 +466,7 @@ class DownloadBase(ABC):
                     url = m3u8_obj.playlists[0].uri
                     logger.info(f'{self.plugin_msg}: stream url: {url}')
                     r = await __client_get(url)
-            else: # 处理 Flv
+            else:  # 处理 Flv
                 r = await __client_get(url, stream=True)
                 if r.headers.get('Location'):
                     url = r.headers['Location']
@@ -425,7 +475,7 @@ class DownloadBase(ABC):
             if r.status_code == 200:
                 return url
         except HTTPStatusError as e:
-            logger.error(f'{self.plugin_msg}: url {url}: status_code-{e.response.status_code}')
+            logger.debug(f'{self.plugin_msg}: url {url}: status_code-{e.response.status_code}')
         except:
             logger.debug(f'{self.plugin_msg}: url {url}: ', exc_info=True)
         return None
@@ -496,6 +546,55 @@ def stream_gears_download(url, headers, file_name, segment_time=None, file_size=
         )
 
 
+def sync_download(stream_url, headers, segment_duration=60, max_file_size=100, output_prefix="segment", stream_info=None, file_name_callback: Callable[[str], None] = None, database_row_id=0):
+    logger.info(f"启动同步下载器 max_file_size {max_file_size}MB")
+    video_queue = queue.SimpleQueue()
+
+    def upload(video_queue, stream_info, stop_event: threading.Event):
+        with SessionLocal() as db:
+            data = get_stream_info(db, f"{stream_info['name']}")
+        data = {**data, "name": stream_info['name']}
+        if "title" not in data:
+            data["title"] = stream_info.get("title", "")
+        # 使用 fmt_title_and_desc 生成格式化后的标题和简介
+        # fmt_title_and_desc 返回 (data, context)，其中 context 中包含已格式化的 description
+        data, context_fmt = fmt_title_and_desc(data)
+
+        # 更新基本信息（含 format_title）
+        stream_info.update(data)
+
+        # 若存在格式化后的简介，将其写入 stream_info，保证后续上传时使用正确的简介
+        if context_fmt.get('description'):
+            stream_info['description'] = context_fmt['description']
+        logger.info(f"stream_info: {stream_info}")
+        # 获取 BiliWebAsync.__init__ 的参数名
+        init_params = inspect.signature(BiliWebAsync.__init__).parameters
+        # 过滤 info 中的无关键
+        filtered_info = {key: value for key, value in stream_info.items() if key in init_params}
+
+        filtered_info['submit_api'] = config.get('submit_api')
+        filtered_info['lines'] = config.get('lines', 'AUTO')
+        # 映射 'uploader' 到 'principal'
+        filtered_info['principal'] = ""
+        filtered_info["data"] = stream_info
+        uploader = BiliWebAsync(**filtered_info, video_queue=video_queue)
+        uploader.upload(total_size=max_file_size * 1024 * 1024,
+                        stop_event=stop_event, output_prefix=output_prefix,
+                        file_name_callback=file_name_callback, database_row_id=database_row_id)
+        # print("上传器结束")
+        logger.info(f"{stream_info['name']} 上传器结束")
+        # video_queue = queue.SimpleQueue()
+
+    downloader = SyncDownloader(stream_url, headers, segment_duration, max_file_size, output_prefix, video_queue)
+
+    # 启动上传器
+    upload_thread = threading.Thread(target=upload, args=(video_queue, stream_info, downloader.stop_event), daemon=True)
+    upload_thread.start()
+
+    downloader.run()
+    logger.info(f"{stream_info['name']} 下载器结束")
+
+
 def get_valid_filename(name):
     """
     Return the given string converted to a string that can be used for a clean
@@ -507,46 +606,46 @@ def get_valid_filename(name):
     '{self.fname}%Y-%m-%dT%H_%M_%S'
     """
     # s = str(name).strip().replace(" ", "_") #因为有些人会在主播名中间加入空格，为了避免和录播完毕自动改名冲突，所以注释掉
-    s = re.sub(r"(?u)[^-\w.%{}\[\]【】「」（）・°\s]", "", str(name))
+    s = re.sub(r"(?u)[^-\w.%{}\[\]【】「」（）・°、。+\s]", "", str(name))
     if s in {"", ".", ".."}:
         raise RuntimeError("Could not derive file name from '%s'" % name)
     return s
 
 
-def get_duration(segment_time_str, time_range):
+def get_duration(segment_time_str, time_range_str):
     """
     计算当前时间到给定结束时间的时差
     如果计算的时差大于segment_time，则返回segment_time。
     """
-    if not time_range or '-' not in time_range:
-        return segment_time_str
-    end_time_str = time_range.split('-')[1]
-
-    now = datetime.now()
-    end_time_today_str = now.strftime("%Y-%m-%d") + " " + end_time_str
-    end_time_today = datetime.strptime(end_time_today_str, "%Y-%m-%d %H:%M:%S")
-    # 判断结束时间是否是第二天的时间
-    if now > end_time_today:
-        end_time_today += timedelta(days=1)
-
-    time_diff = end_time_today - now
-    if segment_time_str:
-        segment_time_parts = list(map(int, segment_time_str.split(":")))
-        segment_time = timedelta(hours=segment_time_parts[0], minutes=segment_time_parts[1], seconds=segment_time_parts[2])
-
-        if time_diff > segment_time:
+    try:
+        time_range = json.loads(time_range_str)
+        if not isinstance(time_range, (list, tuple)) or len(time_range) != 2:
             return segment_time_str
+        end_time = datetime.fromisoformat(time_range[1].replace('Z', '+00:00')).time()
+    except Exception as e:
+        return segment_time_str
 
-    # 增加10s，防止time_diff过小多次执行下载
-    if time_diff.total_seconds() <= 60:
-        time_diff = time_diff + timedelta(seconds=10)
+    now = datetime.now(timezone.utc).time()
+    now_sec = now.hour * 3600 + now.minute * 60 + now.second
+    end_sec = end_time.hour * 3600 + end_time.minute * 60 + end_time.second
 
-    hours, remainder = divmod(time_diff.total_seconds(), 3600)
-    minutes, seconds = divmod(remainder, 60)
+    # 计算到结束时间的秒数
+    diff = end_sec - now_sec if end_sec >= now_sec else (24 * 3600 - now_sec + end_sec)
 
-    to_parameter = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+    try:
+        h, m, s = map(int, segment_time_str.split(':'))
+        segment_sec = h * 3600 + m * 60 + s
+    except Exception:
+        return segment_time_str
 
-    return to_parameter
+    if diff > segment_sec:
+        return segment_time_str
+
+    hours = diff // 3600
+    minutes = (diff % 3600) // 60
+    seconds = diff % 60
+
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 
 class BatchCheck(ABC):

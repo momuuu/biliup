@@ -123,6 +123,7 @@ class UploadStreamers(BaseModel):
     hires: Mapped[int] = mapped_column(nullable=True)  # 是否开启Hi-Res, 1为开启
     open_elec: Mapped[int] = mapped_column(nullable=True)  # 是否开启充电面板, 1为开启
     no_reprint: Mapped[int] = mapped_column(nullable=True)  # 自制声明, 1为未经允许禁止转载
+    is_only_self: Mapped[int] = mapped_column(nullable=True)  # 可见范围, 1为仅自己可见
     uploader: Mapped[str] = mapped_column(nullable=True)  # 覆盖全局默认上传插件，Noop为不上传，但会执行后处理
     user_cookie: Mapped[str] = mapped_column(nullable=True)  # 使用指定的账号上传
     tags = mapped_column(JSON(), nullable=False)  # JSONField()  # 标签
@@ -130,6 +131,7 @@ class UploadStreamers(BaseModel):
     up_selection_reply: Mapped[int] = mapped_column(nullable=True)  # 精选评论
     up_close_reply: Mapped[int] = mapped_column(nullable=True)  # 关闭评论
     up_close_danmu: Mapped[int] = mapped_column(nullable=True)  # 精选评论
+    extra_fields: Mapped[str] = mapped_column(nullable=True)  # 额外字段
     livestreamers: Mapped[List["LiveStreamers"]] = relationship(back_populates="uploadstreamers")
 
 
@@ -142,10 +144,12 @@ class LiveStreamers(BaseModel):
     remark: Mapped[str] = mapped_column(nullable=False)  # 对应配置文件中 {streamer} 变量
     filename_prefix: Mapped[str] = mapped_column(nullable=True)  # filename_prefix 支持模板
     time_range: Mapped[str] = mapped_column(nullable=True)  # 录制时间范围
+    excluded_keywords = mapped_column(JSON(), nullable=True) # 不录制关键词
     # 外键, 对应 UploadStreamers, 且启用级联删除
     upload_streamers_id = mapped_column(ForeignKey("uploadstreamers.id", ondelete="CASCADE"), nullable=True)
     uploadstreamers: Mapped[UploadStreamers] = relationship(back_populates="livestreamers")
     format: Mapped[str] = mapped_column(nullable=True)  # 视频格式
+    override = mapped_column(JSON(), nullable=True)  # 覆写配置
     preprocessor = mapped_column(JSON(), nullable=True)  # 开始下载直播时触发
     segment_processor = mapped_column(JSON(), nullable=True)  # 分段时触发
     downloaded_processor = mapped_column(JSON(), nullable=True)  # 准备上传直播时触发

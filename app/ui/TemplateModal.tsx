@@ -73,6 +73,13 @@ const TemplateModal: React.FC<TemplateModalProps> = ({ children, entity, onOk })
   }
   const handleOk = async () => {
     let values = await api.current?.validate()
+    values = {
+      ...values,
+      remark: values?.remark?.trim(),
+      url: values?.url?.trim(),
+      format: values?.format?.trim(),
+      time_range: JSON.stringify(values?.time_range?.map((date: Date) => date.toISOString())),
+    }
     await onOk(values)
     setVisible(false)
   }
@@ -98,6 +105,15 @@ const TemplateModal: React.FC<TemplateModalProps> = ({ children, entity, onOk })
     }
   })
 
+  try {
+    if (entity && entity.time_range && typeof entity.time_range === "string") {
+      const tr: string[] = JSON.parse(entity.time_range)
+      entity.time_range = tr.map(t => new Date(t))
+    }
+  } catch (e) {
+    console.error(e)
+  }
+
   return (
     <>
       {childrenWithProps}
@@ -105,7 +121,7 @@ const TemplateModal: React.FC<TemplateModalProps> = ({ children, entity, onOk })
         title="录播管理"
         visible={visible}
         onOk={handleOk}
-        style={{ width: 600 }}
+        style={{ width: 'min(600px, 90vw)' }}
         onCancel={handleCancel}
         bodyStyle={{
           overflow: 'auto',
@@ -202,24 +218,59 @@ const TemplateModal: React.FC<TemplateModalProps> = ({ children, entity, onOk })
 
           <Collapse keepDOM>
             <Collapse.Panel header="更多设置" itemKey="processors">
-              <Form.Input
-                field="filename_prefix"
-                label={{ text: '文件名模板', optional: true }}
-                // initValue='./video/%Y-%m-%d/%H_%M_%S{title}'
-                placeholder="{streamer}%Y-%m-%dT%H_%M_%S"
-              />
-
-              <Form.Input
+              <Form.TimePicker
                 field="time_range"
+                type="timeRange"
+                placeholder=" "
                 extraText={
                   <div style={{ fontSize: '14px' }}>
-                    格式：&apos;01:00:00-02:00:00&apos;（时:分:秒-时:分:秒）
+                    如果设置了录制时间范围，不在时间范围内，将不进行录制<br/>
+                    下载器需使用ffmpeg或streamlink
                   </div>
                 }
-                label="录制时间范围"
-                placeholder="01:00:00-02:00:00"
+                label={{
+                    text: '录制时间范围',
+                    optional: true,
+                    style: {
+                        fontSize: '18px',
+                        marginBottom: '4px',
+                        paddingBottom: '8px',
+                        borderBottom: '1px solid var(--semi-color-border)',
+                    }
+                }}
                 style={{ width: 176 }}
               />
+
+              <ArrayField field="excluded_keywords">
+                {({ add, arrayFields }) => (
+                  <Form.Section text="不录制关键词">
+                    <div className="semi-form-field-extra">
+                      如果房间名包含关键词，则停止或不录制该场直播，每个关键词需单独一行<br/>
+                      暂不支持<strong>cc直播</strong>、<strong>yy直播</strong>、<strong>twitch直播</strong>
+                    </div>
+                    <Button icon={<IconPlusCircle />} onClick={add} theme="light">
+                      添加关键词
+                    </Button>
+                    {arrayFields.map(({ field, key, remove }, i) => (
+                      <div key={key} style={{ width: 1000, display: 'flex' }}>
+                        <Form.Input
+                          field={field}
+                          label={`关键词${i + 1}`}
+                          labelPosition="left"
+                          rules={[{ required: true, message }]}
+                        ></Form.Input>
+                        <Button
+                          type="danger"
+                          theme="borderless"
+                          icon={<IconMinusCircle />}
+                          onClick={remove}
+                          style={{ margin: 12 }}
+                        />
+                      </div>
+                    ))}
+                </Form.Section>
+                )}
+              </ArrayField>
 
               <ArrayField field="preprocessor">
                 {({ add, arrayFields }) => (

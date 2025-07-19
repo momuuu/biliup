@@ -13,22 +13,26 @@ from ..engine.decorators import Plugin
 from ..engine.download import DownloadBase
 
 
-@Plugin.download(regexp=r'(?:https?://)?(?:(?:www|m|live|v)\.)?douyin\.com')
+@Plugin.download(regexp=r'https?://(?:(?:www|m|live|v)\.)?douyin\.com')
 class Douyin(DownloadBase):
     def __init__(self, fname, url, suffix='flv'):
         super().__init__(fname, url, suffix)
         self.douyin_danmaku = config.get('douyin_danmaku', False)
-        self.fake_headers['user-agent'] = DouyinUtils.DOUYIN_USER_AGENT
-        self.fake_headers['referer'] = "https://live.douyin.com/"
-        self.fake_headers['cookie'] = config.get('user', {}).get('douyin_cookie', '')
+        self.douyin_quality = config.get('douyin_quality', 'origin')
+        self.douyin_protocol = config.get('douyin_protocol', 'flv')
+        self.douyin_double_screen = config.get('douyin_double_screen', False)
+        self.douyin_true_origin = config.get('douyin_true_origin', False)
         self.__web_rid = None # 网页端房间号 或 抖音号
         self.__room_id = None # 单场直播的直播房间
         self.__sec_uid = None
 
     async def acheck_stream(self, is_check=False):
 
+        self.fake_headers['user-agent'] = DouyinUtils.DOUYIN_USER_AGENT
+        self.fake_headers['referer'] = "https://live.douyin.com/"
+        self.fake_headers['cookie'] = config.get('user', {}).get('douyin_cookie', '')
         if "ttwid" not in self.fake_headers['cookie']:
-            self.fake_headers['Cookie'] = f'ttwid={DouyinUtils.get_ttwid()};{self.fake_headers["cookie"]}'
+            self.fake_headers['cookie'] = f'ttwid={DouyinUtils.get_ttwid()};{self.fake_headers["cookie"]}'
 
         if "v.douyin" in self.url:
             try:
@@ -81,6 +85,8 @@ class Douyin(DownloadBase):
                 _room_info = await self.get_web_room_info(self.__web_rid)
                 if _room_info:
                     if not _room_info['data'].get('user'):
+                        if _room_info['data'].get('prompts', '') == '直播已结束':
+                            return False
                         # 可能是用户被封禁
                         raise Exception(f"{str(_room_info)}")
                     self.__sec_uid = _room_info['data']['user']['sec_uid']
@@ -102,6 +108,7 @@ class Douyin(DownloadBase):
                 logger.debug(f"{self.plugin_msg}: 未开播")
                 return False
             self.__room_id = room_info['id_str']
+            self.room_title = room_info['title']
         except:
             logger.exception(f"{self.plugin_msg}: 获取直播间信息失败")
             return False
@@ -111,52 +118,65 @@ class Douyin(DownloadBase):
 
         try:
             pull_data = room_info['stream_url']['live_core_sdk_data']['pull_data']
-            if room_info['stream_url'].get('pull_datas') and config.get('douyin_double_screen', False):
+            if room_info['stream_url'].get('pull_datas') and self.douyin_double_screen:
                 pull_data = next(iter(room_info['stream_url']['pull_datas'].values()))
             stream_data = json.loads(pull_data['stream_data'])['data']
         except:
             logger.exception(f"{self.plugin_msg}: 加载直播流失败")
             return False
 
-        # 原画origin 蓝光uhd 超清hd 高清sd 标清ld 流畅md 仅音频ao
-        quality_items = ['origin', 'uhd', 'hd', 'sd', 'ld', 'md']
-        quality = config.get('douyin_quality', 'origin')
-        if quality not in quality_items:
-            quality = quality_items[0]
-        try:
-            # 如果没有这个画质则取相近的 优先低清晰度
-            if quality not in stream_data:
-                # 可选的清晰度 含自身
-                optional_quality_items = [x for x in quality_items if x in stream_data.keys() or x == quality]
-                # 自身在可选清晰度的位置
-                optional_quality_index = optional_quality_items.index(quality)
-                # 自身在所有清晰度的位置
-                quality_index = quality_items.index(quality)
-                # 高清晰度偏移
-                quality_left_offset = None
-                # 低清晰度偏移
-                quality_right_offset = None
+                # 抖音FLV真原画
+        if (
+            self.douyin_true_origin  # 开启真原画
+            and
+            self.douyin_quality == 'origin' # 请求原画
+            and
+            self.douyin_protocol == 'flv' # 请求FLV
+            # and
+            # self.raw_stream_url.find('_or4.flv') != -1 # or4(origin)
+        ):
+            self.raw_stream_url = stream_data['ao']['main']['flv'].replace('&only_audio=1', '')
+        else:
+            # 原画origin 蓝光uhd 超清hd 高清sd 标清ld 流畅md 仅音频ao
+            quality_items = ['origin', 'uhd', 'hd', 'sd', 'ld', 'md']
+            quality = self.douyin_quality
+            if quality not in quality_items:
+                quality = quality_items[0]
+            try:
+                # 如果没有这个画质则取相近的 优先低清晰度
+                if quality not in stream_data:
+                    # 可选的清晰度 含自身
+                    optional_quality_items = [x for x in quality_items if x in stream_data.keys() or x == quality]
+                    # 自身在可选清晰度的位置
+                    optional_quality_index = optional_quality_items.index(quality)
+                    # 自身在所有清晰度的位置
+                    quality_index = quality_items.index(quality)
+                    # 高清晰度偏移
+                    quality_left_offset = None
+                    # 低清晰度偏移
+                    quality_right_offset = None
 
-                if optional_quality_index + 1 < len(optional_quality_items):
-                    quality_right_offset = quality_items.index(
-                        optional_quality_items[optional_quality_index + 1]) - quality_index
+                    if optional_quality_index + 1 < len(optional_quality_items):
+                        quality_right_offset = quality_items.index(
+                            optional_quality_items[optional_quality_index + 1]) - quality_index
 
-                if optional_quality_index - 1 >= 0:
-                    quality_left_offset = quality_index - quality_items.index(
-                        optional_quality_items[optional_quality_index - 1])
+                    if optional_quality_index - 1 >= 0:
+                        quality_left_offset = quality_index - quality_items.index(
+                            optional_quality_items[optional_quality_index - 1])
 
-                # 取相邻的清晰度
-                if quality_right_offset <= quality_left_offset:
-                    quality = optional_quality_items[optional_quality_index + 1]
-                else:
-                    quality = optional_quality_items[optional_quality_index - 1]
+                    # 取相邻的清晰度
+                    if quality_right_offset <= quality_left_offset:
+                        quality = optional_quality_items[optional_quality_index + 1]
+                    else:
+                        quality = optional_quality_items[optional_quality_index - 1]
 
-            protocol = 'hls' if config.get('douyin_protocol') == 'hls' else 'flv'
-            self.raw_stream_url = stream_data[quality]['main'][protocol].replace('http://', 'https://')
-            self.room_title = room_info['title']
-        except:
-            logger.exception(f"{self.plugin_msg}: 寻找清晰度失败")
-            return False
+                protocol = 'hls' if self.douyin_protocol == 'hls' else 'flv'
+                self.raw_stream_url = stream_data[quality]['main'][protocol]
+            except:
+                logger.exception(f"{self.plugin_msg}: 寻找清晰度失败")
+                return False
+
+        self.raw_stream_url = self.raw_stream_url.replace('http://', 'https://')
         return True
 
     def danmaku_init(self):
@@ -205,7 +225,7 @@ class DouyinUtils:
     # DOUYIN_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36'
     DOUYIN_USER_AGENT = random_user_agent()
     DOUYIN_HTTP_HEADERS = {
-        'User-Agent': DOUYIN_USER_AGENT
+        'user-agent': DOUYIN_USER_AGENT
     }
 
     @staticmethod

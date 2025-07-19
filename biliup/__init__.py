@@ -1,8 +1,10 @@
 import logging
 import platform
 import sys
+from importlib.metadata import version
 
-__version__ = "0.4.81"
+__version__ = version("biliup")
+
 
 LOG_CONF = {
     'version': 1,

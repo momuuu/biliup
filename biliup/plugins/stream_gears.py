@@ -13,7 +13,7 @@ class BiliWeb(UploadBase):
             self, principal, data, submit_api=None, copyright=2, postprocessor=None, dtime=None,
             dynamic='', lines='AUTO', threads=3, tid=122, tags=None, cover_path=None, description='',
             dolby=0, hires=0, no_reprint=0, open_elec=0, credits=None,
-            user_cookie='cookies.json', copyright_source=None
+            user_cookie='cookies.json', copyright_source=None, extra_fields = ""
     ):
         super().__init__(principal, data, persistence_path='bili.cookie', postprocessor=postprocessor)
         if credits is None:
@@ -43,20 +43,26 @@ class BiliWeb(UploadBase):
         self.user_cookie = user_cookie
         self.copyright_source = copyright_source
 
+        if "extra_fields" in self.data:
+            self.extra_fields = self.data["extra_fields"]
+        else:
+            self.extra_fields = extra_fields
+
+
     def upload(self, file_list) -> List[UploadBase.FileInfo]:
         line = None
-        if self.lines == 'kodo':
-            line = stream_gears.UploadLine.Kodo
+        if self.lines == 'bda':
+            line = stream_gears.UploadLine.Bda
         elif self.lines == 'bda2':
             line = stream_gears.UploadLine.Bda2
-        elif self.lines == 'ws':
-            line = stream_gears.UploadLine.Ws
         elif self.lines == 'qn':
             line = stream_gears.UploadLine.Qn
-        elif self.lines == 'cos':
-            line = stream_gears.UploadLine.Cos
-        elif self.lines == 'cos-internal':
-            line = stream_gears.UploadLine.CosInternal
+        elif self.lines == 'tx':
+            line = stream_gears.UploadLine.Tx
+        elif self.lines == 'txa':
+            line = stream_gears.UploadLine.Txa
+        elif self.lines == 'bldsa':
+            line = stream_gears.UploadLine.Bldsa
         tag = ','.join(self.tags)
         if self.credits:
             desc_v2 = self.creditsToDesc_v2()
@@ -72,25 +78,26 @@ class BiliWeb(UploadBase):
         dtime = None
         if self.dtime:
             dtime = int(time.time() + self.dtime)
-        stream_gears.upload(
-            file_list,
-            self.user_cookie,
-            self.data["format_title"][:80],
-            self.tid,
-            tag,
-            self.copyright,
-            source,
-            self.desc,
-            self.dynamic,
-            cover,
-            self.dolby,
-            self.hires,
-            self.no_reprint,
-            self.open_elec,
-            self.threads,
-            desc_v2,
-            dtime,
-            line
+        stream_gears.upload_by_app(
+            video_path=file_list,
+            cookie_file=self.user_cookie,
+            title=self.data["format_title"][:80],
+            tid=self.tid,
+            tag=tag,
+            copyright=self.copyright,
+            source=source,
+            desc=self.desc,
+            dynamic=self.dynamic,
+            cover=cover,
+            dolby=self.dolby,
+            lossless_music=self.hires,
+            no_reprint=self.no_reprint,
+            open_elec=self.open_elec,
+            limit=self.threads,
+            desc_v2=desc_v2,
+            dtime=dtime,
+            line=line,
+            extra_fields=self.extra_fields
         )
         logger.info(f"上传成功: {self.principal}")
         return file_list

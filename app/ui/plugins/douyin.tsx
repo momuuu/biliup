@@ -1,13 +1,25 @@
 'use client'
-import React from 'react'
-import { Form, Select, Collapse } from '@douyinfe/semi-ui'
+import React, { useEffect } from 'react'
+import { Form, Select, Collapse, useFormApi } from '@douyinfe/semi-ui'
 
 type Props = {
   entity: any
+  list: any
+  initValues?: Record<string, any>
 }
 
 const Douyin: React.FC<Props> = props => {
-  const entity = props.entity
+  const { entity, list, initValues } = props
+  const formApi = useFormApi()
+
+  useEffect(() => {
+    if (initValues) {
+      Object.entries(initValues).forEach(([key, value]) => {
+        formApi.setValue(key, value)
+      })
+    }
+  }, [initValues, formApi])
+
   return (
     <>
       <Collapse.Panel header="抖音" itemKey="douyin">
@@ -88,6 +100,15 @@ const Douyin: React.FC<Props> = props => {
             </div>
           }
           label="双屏直播录制方式（douyin_double_screen）"
+          fieldStyle={{
+            alignSelf: 'stretch',
+            padding: 0,
+          }}
+        />
+        <Form.Switch
+          field="douyin_true_origin"
+          extraText="仅限直播流协议为 FLV 时生效，默认关闭。开启后可能录制到 HEVC 编码，而 stream-gears（默认下载器）暂不支持，请切换下载器后录制。"
+          label="抖音真原画（douyin_true_origin）"
           fieldStyle={{
             alignSelf: 'stretch',
             padding: 0,

@@ -1,7 +1,7 @@
 'use client'
 import './globals.css'
 import styles from './page.module.css'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Button, Nav } from '@douyinfe/semi-ui'
@@ -16,10 +16,12 @@ import {
   IconVideoListStroked,
   IconHome,
   IconSetting,
+  IconHistory,
 } from '@douyinfe/semi-icons'
 import Image from 'next/image'
 import ThemeButton from './ui/ThemeButton'
 import { useSystemTheme, useTheme } from './lib/utils'
+import { useWindowSize } from 'react-use';
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const { Sider } = SeLayout
@@ -31,13 +33,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   const [openKeys, setOpenKeys] = useState(initOpenKeys)
   const [selectedKeys, setSelectedKeys] = useState<any>([pathname.slice(1)])
-  const [isCollapsed, setIsCollapsed] = useState(false)
+
+  const { width } = useWindowSize()
+  const [isCollapsed, setIsCollapsed] = useState(width <= 640)
   const [mode, setMode] = useState(
     (typeof window !== 'undefined' && localStorage.getItem('mode')) || 'auto'
   )
   const systemTheme = useSystemTheme()
   useTheme(mode, systemTheme)
   let navStyle = isCollapsed ? { height: '100%', overflow: 'visible' } : { height: '100%' }
+
+  // 兼容 PC 切移动端
+  useEffect(() => {
+    if (width <= 640) {
+      setIsCollapsed(true)
+    }
+  }, [width]);
 
   const items = useMemo(
     () =>
@@ -129,9 +140,26 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 padding: '4px',
               }}
             >
+              <IconHistory size="small" />
+            </div>
+          ),
+        },
+        {
+          text: '实时日志',
+          icon: (
+            <div
+              style={{
+                backgroundColor: 'rgba(var(--semi-blue-4), 1)',
+                borderRadius: 'var(--semi-border-radius-medium)',
+                color: 'var(--semi-color-bg-0)',
+                display: 'flex',
+                padding: '4px',
+              }}
+            >
               <IconCustomerSupport size="small" />
             </div>
           ),
+          itemKey: 'logViewer',
         },
         {
           text: '任务平台',
@@ -182,6 +210,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       'upload-manager': '/upload-manager',
       job: '/job',
       status: '/status',
+      logViewer: '/logviewer',
     }
     if (!routerMap[props.itemKey]) {
       return itemElement
@@ -240,17 +269,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   // <IconSemiLogo
                   //     style={{ height: "36px", fontSize: 36 }}
                   // />
-                  <Image src="logo.png" alt="{}" height={10} width={20}></Image>
+                  <Image src="/logo.png" alt="{}" height={10} width={20}></Image>
                 }
-                style={{ justifyContent: 'flex-start' }}
+                style={isCollapsed ? { flexDirection: 'column', paddingLeft: 0, paddingRight: 0, paddingBottom: 0, gap: '8px' } : { justifyContent: 'flex-start' }}
                 text="BILIUP"
               >
                 <div
                   style={{
                     flexGrow: 1,
-                    display: 'flex',
+                    display: width <= 640 ? 'none' : 'flex',
                     flexDirection: 'row-reverse',
-                    alignSelf: 'flex-end',
                     zIndex: 2,
                   }}
                 >

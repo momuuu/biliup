@@ -8,6 +8,7 @@ import brotli
 
 from biliup.plugins import match1
 from biliup.plugins import random_user_agent
+from biliup.plugins import wbi, generate_fake_buvid3
 
 logger = logging.getLogger('biliup')
 
@@ -27,32 +28,14 @@ class Bilibili:
 
     @staticmethod
     async def get_ws_info(url, content):
-        # 判断是否要录制详细弹幕
-        if content.get('detail', False):
-            # 获取传入的用户信息
-            cookie_str = content.get('cookie', "") if content.get('cookie', False) else ""
-            buid = content.get('bili_uid', 0)
-            Bilibili.headers['cookie'] = cookie_str
 
-            # 如buid不为0但没有cookie传入
-            if not cookie_str and buid != 0:
-                build = 0
-
-            # 获取B站用户ID
-            if cookie_str and buid == 0:
-                async with aiohttp.ClientSession(headers=Bilibili.headers) as session:
-                    try:
-                        async with session.get(f"https://api.bilibili.com/x/web-interface/nav", timeout=5) as resp:
-                            resp_data = await resp.json()
-                            buid = resp_data["data"]["mid"]
-                            logger.info(f"获取B站用户ID {buid}")
-                    except Exception as e:
-                        buid = 0
-                        Bilibili.headers['cookie'] = ""
-                        pass
-        else:
-            buid = 0
-
+        uid = content['uid']
+        # 传入内容中，如果 uid 不为 0，则 cookie 必然存在，且必然为详细模式
+        Bilibili.headers['cookie'] = f"buvid3={generate_fake_buvid3()};"
+        if uid > 0:
+            Bilibili.headers['cookie'] += content['cookie']
+            
+            
         # 获取弹幕认证信息
         danmu_wss_url = 'wss://broadcastlv.chat.bilibili.com/sub'
         room_id = content.get('room_id')
@@ -62,9 +45,18 @@ class Bilibili:
                                    timeout=5) as resp:
                     room_json = await resp.json()
                     room_id = room_json['data']['room_id']
-            async with session.get(f"https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?type=0&id={room_id}",
+            # 2025-05-29 B站新风控需要WBI
+            params = {
+                'id': str(room_id),
+                'type': '0',
+                'web_location': '444.8'
+            }
+            wbi.sign(params)
+            
+            async with session.get(f"https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo",params=params,
                                    timeout=5) as resp:
                 danmu_info = await resp.json()
+                #print(danmu_info)
                 danmu_token = danmu_info['data']['token']
                 try:
                     # 允许可能获取不到返回的host
@@ -74,7 +66,7 @@ class Bilibili:
                     pass
 
             w_data = {
-                'uid': buid,
+                'uid': uid,
                 'roomid': room_id,
                 'protover': 3,
                 'platform': 'web',
@@ -83,7 +75,7 @@ class Bilibili:
             }
 
             data = json.dumps(w_data).encode('utf-8')
-            logger.info(f"danmaku auth info {data}")
+            # logger.info(f"danmaku auth info {data}")
             reg_datas = [(pack('>i', len(data) + 16) + b'\x00\x10\x00\x01' + pack('>i', 7) + pack('>i', 1) + data)]
         return danmu_wss_url, reg_datas
 
@@ -118,6 +110,11 @@ class Bilibili:
                 else:
                     packet_data = packet_data[packet_len:]
             return dm_list
+
+        def bytes_serializer(obj):
+            if isinstance(obj, bytes):
+                return obj.decode('utf-8')
+            raise TypeError("Type not serializable")
 
         dm_list = decode_packet(data)
         for dm in dm_list:
@@ -188,6 +185,10 @@ class Bilibili:
                         msg['content'] = j
                 else:
                     msg = {'name': '', 'content': dm.get('body'), 'msg_type': 'other'}
+                try:
+                    msg['raw_data'] = json.dumps(dm, default=bytes_serializer, ensure_ascii=False)
+                except:
+                    msg['raw_data'] = ""
                 msgs.append(msg)
             except Exception as Error:
                 logger.warning(f"{Bilibili.__name__}: 弹幕接收异常 - {Error}")

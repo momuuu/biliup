@@ -13,8 +13,8 @@ class BiliWeb(UploadBase):
     def __init__(
             self, principal, data, submit_api=None, copyright=2, postprocessor=None, dtime=None,
             dynamic='', lines='AUTO', threads=3, tid=122, tags=None, cover_path=None, description='',
-            dolby=0, hires=0, no_reprint=0, open_elec=0, credits=None,
-            user_cookie='cookies.json', copyright_source=None
+            dolby=0, hires=0, no_reprint=0, is_only_self=0, open_elec=0, credits=None,
+            user_cookie='cookies.json', copyright_source=None, extra_fields = ""
     ):
         super().__init__(principal, data, persistence_path='bili.cookie', postprocessor=postprocessor)
         if tags is None:
@@ -40,9 +40,15 @@ class BiliWeb(UploadBase):
         self.dolby = dolby
         self.hires = hires
         self.no_reprint = no_reprint
+        self.is_only_self = is_only_self
         self.open_elec = open_elec
         self.user_cookie = user_cookie
         self.copyright_source = copyright_source
+
+        if 'extra_fields' in data:
+            self.extra_fields = data.get('extra_fields', '')
+        else:
+            self.extra_fields = extra_fields
 
     def upload(self, file_list: List[UploadBase.FileInfo]) -> List[UploadBase.FileInfo]:
         if self.credits:
@@ -74,9 +80,9 @@ class BiliWeb(UploadBase):
             "open_elec": self.open_elec,
             "limit": self.threads,
             "desc_v2": desc_v2,
+            "extra_fields": self.extra_fields,
             "dtime": int(time.time() + self.dtime) if self.dtime else None,
         }
-
         upload_process = mp.get_context('spawn').Process(target=stream_gears_upload, daemon=True, kwargs=upload_args)
         upload_process.start()
         upload_process.join()
@@ -122,8 +128,6 @@ def stream_gears_upload(ex_conn, lines, *args, **kwargs):
             kwargs['line'] = stream_gears.UploadLine.Bda
         elif lines == 'bda2':
             kwargs['line'] = stream_gears.UploadLine.Bda2
-        elif lines == 'ws':
-            kwargs['line'] = stream_gears.UploadLine.Ws
         elif lines == 'qn':
             kwargs['line'] = stream_gears.UploadLine.Qn
         elif lines == 'tx':
@@ -133,6 +137,6 @@ def stream_gears_upload(ex_conn, lines, *args, **kwargs):
         elif lines == 'bldsa':
             kwargs['line'] = stream_gears.UploadLine.Bldsa
 
-        stream_gears.upload(*args, **kwargs)
+        stream_gears.upload_by_app(*args, **kwargs)
     except Exception as e:
         ex_conn.send(e)
